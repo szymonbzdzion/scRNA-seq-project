@@ -1,0 +1,1240 @@
+---
+title: "scRNA-seq-project"
+author: "Szymon Bzdzion"
+date: "2023-05-11"
+output: html_document
+---
+
+## scRNA-seq analysis of publicly available data from GEO: GSE206940
+
+Reference: <https://elifesciences.org/articles/81154>
+
+## Title: The meningeal transciptional response to traumatic brain injury and aging
+
+I downloaded the data from GEO. There are two files: sham - control meningeal samples from mice after the sham procedure and TBI - meningeal samples from mice after traumatic brain injury (TBI)
+
+I did basic single-cell RNA-seq analysis using `Seurat`, explored cell-cell interactions with `CellChat`, performed differential expression analysis for selected clusters using `DESeq2` and examined pseudotime trajectory analysis with `Monocle3`\
+\
+
+## Removing doublets
+
+First, I loaded data files, applied basic filtering, QC and removed doublets using `DoubletFinder` package
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(Seurat)
+library(tidyseurat)
+library(DoubletFinder)
+```
+
+```{r}
+#### sham #### 
+
+sham_data <- Read10X('./sham/')
+
+sham_seu <- CreateSeuratObject(sham_data, project = 'sham', min.cells = 3, min.features = 150)
+sham_seu
+
+rownames(sham_seu)[grep('^mt-', rownames(sham_seu))]
+
+sham_seu[['percent_mt']] <- PercentageFeatureSet(sham_seu, pattern = '^mt-')
+
+sham_seu
+```
+
+QC plots
+
+```{r}
+rm(sham_data)
+
+VlnPlot(sham_seu, features = c('nCount_RNA', 'nFeature_RNA', 'percent_mt'))
+
+FeatureScatter(sham_seu, feature1 = 'nCount_RNA', feature2 = 'nFeature_RNA')
+FeatureScatter(sham_seu, feature1 = 'nCount_RNA', feature2 = 'percent_mt')
+```
+
+Filtering the data
+
+```{r}
+sham_seu <- subset(sham_seu, subset = nFeature_RNA > 150 & nFeature_RNA < 5000 & percent_mt < 20)
+sham_seu
+
+```
+
+QC plots after filtering
+
+```{r}
+VlnPlot(sham_seu, features = c('nCount_RNA', 'nFeature_RNA', 'percent_mt'))
+
+FeatureScatter(sham_seu, feature1 = 'nCount_RNA', feature2 = 'nFeature_RNA')
+FeatureScatter(sham_seu, feature1 = 'nCount_RNA', feature2 = 'percent_mt')
+
+```
+
+In the original publication authors used `NormalizeData()` and `ScaleData()` for transforming the data. I decided to use `SCTransform()` instead.
+
+```{r}
+sham_seu <- SCTransform(sham_seu, vars.to.regress = 'percent_mt')
+sham_seu <- RunPCA(sham_seu, npcs = 40)
+
+ElbowPlot(sham_seu, ndims = 30)
+```
+
+I used 30 dimensions for further processing\
+
+```{r}
+sham_seu <- RunUMAP(sham_seu, dims = 1:30, reduction = 'pca')
+
+DimPlot(sham_seu, reduction = 'umap')
+
+sham_seu <- RunTSNE(sham_seu, dims = 1:30, reduction = 'pca')
+
+DimPlot(sham_seu, reduction = 'tsne')
+```
+
+Next I performed clustering with adjusted parameters
+
+```{r}
+sham_seu <- FindNeighbors(sham_seu, dims = 1:30, reduction = 'pca')
+sham_seu <- FindClusters(sham_seu, resolution = 0.1)
+
+DimPlot(sham_seu, reduction = 'umap')
+```
+
+I prepared the data for a doublet finding process
+
+```{r message=FALSE, warning=FALSE, include=FALSE, echo=TRUE}
+annotations <- sham_seu@meta.data$seurat_clusters
+
+homotypic_prop <- modelHomotypic(annotations = annotations)
+
+nExp_poi <- round(0.075 * nrow(sham_seu@meta.data))
+nExp_poi_adj <- round(nExp_poi *  (1 - homotypic_prop))
+
+sweep_res_list <- paramSweep_v3(sham_seu, PCs = 1:30, sct = T)
+sweep_stats <- summarizeSweep(sweep_res_list, GT=FALSE)
+head(sweep_stats)
+
+bcmv_WT <- find.pK(sweep_stats)
+
+ggplot(bcmv_WT, aes(pK, BCmetric, group = 1)) +
+  geom_point() +
+  geom_line()
+
+```
+
+After choosing the optimal pK value, I did a doublet analysis
+
+```{r}
+sham_seu <- doubletFinder_v3(sham_seu, PCs = 1:40, pN = 0.25, pK = 0.01, nExp = nExp_poi, reuse.pANN = F, sct = T)
+
+table(sham_seu@meta.data$DF.classifications_0.25_0.01_175)
+
+DimPlot(sham_seu, reduction = 'umap', group.by = 'DF.classifications_0.25_0.01_175')
+```
+
+```{r}
+sham_seu <- doubletFinder_v3(sham_seu, PCs = 1:40, pN = 0.25, pK = 0.01, nExp = nExp_poi_adj, reuse.pANN = F, sct = T)
+table(sham_seu@meta.data$DF.classifications_0.25_0.01_148)
+
+
+DimPlot(sham_seu, reduction = 'umap', group.by = 'DF.classifications_0.25_0.01_148')
+```
+
+I used adjusted analysis and removed doublets from the data\
+
+```{r}
+sham_seu <- sham_seu %>% 
+  filter(DF.classifications_0.25_0.01_148 == 'Singlet')
+
+saveRDS(sham_seu, 'sham_seu_filtered.RDS')
+```
+
+\
+I did the same analysis for TBI data\
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+TBI_data <- Read10X('./TBI/')
+
+TBI_seu <- CreateSeuratObject(TBI_data, project = 'TBI', min.cells = 3, min.features = 150)
+TBI_seu
+
+rownames(TBI_seu)[grep('^mt-', rownames(TBI_seu))]
+
+TBI_seu[['percent_mt']] <- PercentageFeatureSet(TBI_seu, pattern = '^mt-')
+
+TBI_seu
+
+rm(TBI_data)
+
+VlnPlot(TBI_seu, features = c('nCount_RNA', 'nFeature_RNA', 'percent_mt'))
+
+FeatureScatter(TBI_seu, feature1 = 'nCount_RNA', feature2 = 'nFeature_RNA')
+FeatureScatter(TBI_seu, feature1 = 'nCount_RNA', feature2 = 'percent_mt')
+
+TBI_seu <- subset(TBI_seu, subset = nFeature_RNA > 150 & nFeature_RNA < 5000 & percent_mt < 20)
+TBI_seu
+
+VlnPlot(TBI_seu, features = c('nCount_RNA', 'nFeature_RNA', 'percent_mt'))
+
+FeatureScatter(TBI_seu, feature1 = 'nCount_RNA', feature2 = 'nFeature_RNA')
+FeatureScatter(TBI_seu, feature1 = 'nCount_RNA', feature2 = 'percent_mt')
+
+
+TBI_seu <- SCTransform(TBI_seu, vars.to.regress = 'percent_mt')
+TBI_seu <- RunPCA(TBI_seu, npcs = 40)
+
+ElbowPlot(TBI_seu, ndims = 30)
+
+TBI_seu <- RunUMAP(TBI_seu, dims = 1:30, reduction = 'pca')
+
+DimPlot(TBI_seu, reduction = 'umap')
+
+TBI_seu <- RunTSNE(TBI_seu, dims = 1:30, reduction = 'pca')
+
+DimPlot(TBI_seu, reduction = 'tsne')
+
+TBI_seu <- FindNeighbors(TBI_seu, dims = 1:30, reduction = 'pca')
+TBI_seu <- FindClusters(TBI_seu, resolution = 0.04)
+
+DimPlot(TBI_seu, reduction = 'umap')
+
+annotations <- TBI_seu@meta.data$seurat_clusters
+
+homotypic_prop <- modelHomotypic(annotations = annotations)
+
+nExp_poi <- round(0.075 * nrow(TBI_seu@meta.data))
+nExp_poi_adj <- round(nExp_poi *  (1 - homotypic_prop))
+
+sweep_res_list <- paramSweep_v3(TBI_seu, PCs = 1:30, sct = T)
+sweep_stats <- summarizeSweep(sweep_res_list, GT=FALSE)
+head(sweep_stats)
+
+bcmv_WT <- find.pK(sweep_stats)
+
+ggplot(bcmv_WT, aes(pK, BCmetric, group = 1)) +
+  geom_point() +
+  geom_line()
+
+TBI_seu <- doubletFinder_v3(TBI_seu, PCs = 1:40, pN = 0.25, pK = 0.12, nExp = nExp_poi, reuse.pANN = F, sct = T)
+
+table(TBI_seu@meta.data$DF.classifications_0.25_0.12_296)
+
+DimPlot(TBI_seu, reduction = 'umap', group.by = 'DF.classifications_0.25_0.12_296')
+
+
+TBI_seu <- doubletFinder_v3(TBI_seu, PCs = 1:40, pN = 0.25, pK = 0.12, nExp = nExp_poi_adj, reuse.pANN = F, sct = T)
+table(TBI_seu@meta.data$DF.classifications_0.25_0.12_237)
+
+
+DimPlot(TBI_seu, reduction = 'umap', group.by = 'DF.classifications_0.25_0.12_237')
+
+
+TBI_seu <- TBI_seu %>% 
+  filter(DF.classifications_0.25_0.12_237 == 'Singlet')
+
+saveRDS(TBI_seu, 'TBI_filtered_seu.RDS')
+```
+
+In the next step, I used the filtered data for data sets integration
+
+```{r}
+rm(list = ls())
+
+sham_seu <- readRDS('sham_seu_filtered.RDS')
+
+TBI_seu <- readRDS('TBI_filtered_seu.RDS')
+
+VlnPlot(sham_seu, features = c('nCount_RNA', 'nFeature_RNA', 'percent_mt'), group.by = 'orig.ident')
+FeatureScatter(sham_seu, feature1 = 'nCount_RNA', feature2 = 'nFeature_RNA', group.by = 'orig.ident')
+
+
+seu_list <- list(sham_seu, TBI_seu)
+```
+
+I used `SCTransform()` method for integration
+
+```{r message=FALSE, warning=FALSE}
+seu_list <- lapply(seu_list, function(x) {
+  DefaultAssay(x) <- "RNA"
+  x <- SCTransform(x)
+})
+
+
+features <- SelectIntegrationFeatures(seu_list, nfeatures = 3000)
+
+sct_integ <- PrepSCTIntegration(seu_list, anchor.features = features)
+
+```
+
+I did all the steps according to the `Seurat` integration vignette
+
+```{r message=FALSE, warning=FALSE}
+rm(sham_seu, TBI_seu)
+
+int_anchors <- FindIntegrationAnchors(sct_integ, normalization.method = 'SCT', anchor.features = features)
+
+seu_combined <- IntegrateData(int_anchors, normalization.method = 'SCT')
+
+saveRDS(seu_combined, 'seu_combined.RDS')
+```
+
+Next, I performed a standard analysis of integrated data
+
+```{r message=FALSE, warning=FALSE}
+seu_combined <- readRDS('seu_combined.RDS')
+
+#rm(sct_integ, seu_list, int_anchors)
+
+
+DefaultAssay(seu_combined) <- 'integrated'
+
+seu_combined <- SCTransform(seu_combined, vars.to.regress = 'percent_mt')
+
+seu_combined <- RunPCA(seu_combined, npcs = 40)
+```
+
+I visualized the PCA results
+
+```{r}
+ElbowPlot(seu_combined, ndims = 40)
+VizDimLoadings(seu_combined, reduction = 'pca', dims = 1:4)
+
+DimPlot(seu_combined, reduction = 'pca', group.by = 'orig.ident')
+
+DimHeatmap(seu_combined, dims = 1:3, cells = 500, balanced = T)
+```
+
+I used 40 dimensions for further processing
+
+```{r}
+seu_combined <- RunUMAP(seu_combined, dims = 1:40, reduction = 'pca')
+
+DimPlot(seu_combined, reduction = 'umap', group.by = 'orig.ident', split.by = 'orig.ident')
+DimPlot(seu_combined, reduction = 'umap', group.by = 'orig.ident')
+seu_combined
+
+```
+
+Clustering
+
+```{r}
+seu_combined <- FindNeighbors(seu_combined, dims = 1:40)
+seu_combined <- FindClusters(seu_combined, resolution = 0.5)
+
+DimPlot(seu_combined, reduction = 'umap')
+```
+
+Getting the markers for all clusters
+
+```{r}
+all_markers <- FindAllMarkers(seu_combined, min.pct = 0.25, logfc.threshold = 0.25, only.pos = T)
+
+seu_combined[['sample']] <- seu_combined$orig.ident
+```
+
+```{r}
+top_markers <- all_markers %>%
+  group_by(cluster) %>%
+  slice_max(n=2, order_by = avg_log2FC)
+top_markers
+
+```
+
+```{r}
+DimPlot(seu_combined, reduction = 'umap', label = T, label.size = 5) + NoLegend()
+```
+
+Based on the Cell Marker 2.0 database and original publication I assigned cell types to clusters
+
+```{r fig.width=10, fig.height=7}
+my_markers <- c('Fibroblasts', 'Macrophages 1', 'Endothelial cells', 'Red blood cells',
+                'Macrophages 2', 'B cells 1', 'Microglial cells (high mt)', 'CD3+ T cells',
+                'Dendritic cells 1', 'B cells 2', 'Endothelial cells 2', 'Th cells',
+                'B cells 3', 'Oligodendrocyte 1', 'NK cells', 'Astrocyte', 'Pericyte', 'Microglial 1',
+                'Treg cells', 'Microglial cells 2', 'Schwann cells', 'Neutrophil', 'Macrophages 3',
+                'Oligodendrocyte 2')
+
+
+length(my_markers)
+length(levels(seu_combined))
+seu_combined[['og_clusters']] <- Idents(seu_combined)
+
+names(my_markers) <- levels(seu_combined)
+seu_combined <- RenameIdents(seu_combined, my_markers)
+
+DimPlot(seu_combined, reduction = 'umap', label = T, label.size = 4, repel = T) + NoLegend()
+```
+
+## Cell cycle
+
+I checked the expression of cell cycle genes in data sets
+
+```{r}
+
+library(babelgene)
+
+s_genes <- orthologs(genes = cc.genes.updated.2019$s.genes, species = "mouse")$symbol
+s_genes
+
+g2m_genes <- orthologs(genes = cc.genes.updated.2019$g2m.genes, species = "mouse")$symbol
+g2m_genes
+
+seu_combined <- CellCycleScoring(seu_combined, s.features = s_genes, g2m.features = g2m_genes, set.ident = T)
+
+seu_combined
+```
+
+```{r}
+cell_cycle_df <- as.data.frame(table(seu_combined@meta.data$sample ,seu_combined@meta.data$Phase))
+cell_cycle_df
+
+
+ggplot(cell_cycle_df, aes(x = Var1, Freq, fill=Var2)) +
+  geom_bar(stat = 'identity', position = 'stack') 
+```
+
+```{r include=FALSE}
+Idents(seu_combined) <- seu_combined$og_clusters
+names(my_markers) <- levels(seu_combined)
+seu_combined <- RenameIdents(seu_combined, my_markers)
+
+DimPlot(seu_combined, reduction = 'umap', label = T, label.size = 4, repel = T) + NoLegend()
+```
+
+Visualization of selected markers
+
+```{r fig.width=8, fig.height=8}
+FeaturePlot(seu_combined, features = c('Ly6c2', 'Apoe', 'Cd74', 'Sox10', 'Cd3e', 'CCl5', 'Gzma'))
+```
+
+```{r fig.width=15, fig.height=10}
+markers_to_plot <- c('Col1a1', 'Col1a2', 'Apoe', 'C1qc', 'C1qa', 'Ly6c1', 'Ptprb', 'Hbb-bs', 'H2-Eb1', 'Cd74',
+                     'Cd79a', 'Cd79b', 'Dock2', 'Cd3e', 'Cd3g', 'Cd209a', 'H2-Ab1', 'Igkc', 'Vwf', 'Clec14a',
+                     'Il7r', 'Gata3', 'Vpreb3', 'Enpp2', 'Gzma', 'Nkg7', 'Chgb', 'Glul', 'Rgs5', 'Pdgfrb',
+                     'Lyz2', 'Cd163l1', 'Cd3d', 'Siglech', 'Ly6c2', 'Sox10', 'S100b', 'S100a9', 'S100a8', 
+                     'Ccl5', 'Ccr7', 'Cd9', 'Ncmap')
+library(viridis)
+DotPlot(seu_combined, features = markers_to_plot, cols = c(rocket(100)[25], rocket(100)[90]), 
+        dot.scale = 8, split.by = 'sample') + RotatedAxis()
+
+barplot_df <- as.data.frame(table(seu_combined$sample, Idents(seu_combined)))
+barplot_df <- barplot_df %>% filter(Freq > 0)
+
+barplot_df %>%
+  ggplot(aes(x = Var2, y = Freq, fill = Var1)) +
+  geom_bar(stat = 'identity', position = 'dodge', width = 0.7)+ 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c(rocket(100)[28], rocket(100)[93])) +
+  scale_y_continuous(expand = expansion(mult = 0, add = 0))
+```
+
+### Clusters by sample
+
+```{r fig.width=12, fig.height=8}
+DimPlot(seu_combined, reduction = 'umap', label = T, label.size = 4, repel = T, split.by = 'sample') + NoLegend()  
+```
+
+```{r}
+saveRDS(seu_combined, 'seu_combined_clustered.RDS')
+
+
+seu_combined <- readRDS('seu_combined_clustered.RDS')
+
+seu_combined[['cell_types']] <- Idents(seu_combined)
+
+```
+
+## DE analysis
+
+Authors of the original paper selected macrophages, T cells, and B cells for DE based on previous knowledge
+
+```{r}
+macrophage_seu <- seu_combined %>%
+    filter(cell_types %in% c('Macrophages 1', 'Macrophages 2', 'Macrophages 3'))
+
+saveRDS(macrophage_seu, 'macrophage_seu.RDS')
+
+
+
+T_cells_seu <- seu_combined %>%
+  filter(cell_types %in% c('Th cells', 'NK cells', 'Treg cells', 'CD3+ T cells'))
+
+saveRDS(T_cells_seu ,'Tcells_seu.rds')
+
+B_cells_seu <- seu_combined %>%
+  filter(cell_types %in% c('B cells 1', 'B cells 2', 'B cells 3'))
+
+saveRDS(B_cells_seu, 'Bcells_seu.rds')
+```
+
+I prepared the data for DE analysis
+
+```{r message=FALSE, warning=FALSE}
+library(DESeq2)
+
+macro_seu <- readRDS('macrophage_seu.RDS')
+
+macro_seu <- macro_seu %>%
+  filter(cell_types %in% c('Macrophages 1', 'Macrophage 2'))
+
+macro_counts <- as.matrix(macro_seu@assays$RNA@counts)
+macro_counts[1:10, 1:5]
+macro_counts <- macro_counts[rowSums(macro_counts) > 0, ]
+
+flt_macro_counts <- rowSums(macro_counts >= 7) >= 5
+table(flt_macro_counts)
+
+macro_counts <- macro_counts[flt_macro_counts, ]
+
+dim(macro_counts)
+flt_macro_seu <- macro_seu[,colnames(macro_seu) %in% colnames(macro_counts)]
+
+col_data <- as.data.frame(macro_seu@meta.data$sample)
+colnames(col_data) <- 'treatment'
+rownames(col_data) <- colnames(flt_macro_seu)
+
+
+
+dds <- DESeqDataSetFromMatrix(macro_counts, colData = col_data, design = ~ treatment)
+```
+
+I used optimal parameters for single-cell RNA-seq based on`DESeq2` vignette
+
+```{r}
+dds <- estimateSizeFactors(dds, type='poscount')
+
+dds <- DESeq(dds, test="LRT", reduced=~1, useT=TRUE, minmu=1e-6, minReplicatesForReplace = Inf)
+
+res_macro <- results(dds)
+res_macro
+summary(res_macro)
+
+
+```
+
+Then I did an enrichment analysis
+
+```{r message=FALSE, warning=FALSE}
+res_macro <- as.data.frame(res_macro)
+res_macro <- res_macro %>%
+  arrange(padj, desc(log2FoldChange))
+
+
+res_macro$symbol <- rownames(res_macro)
+
+
+
+library(clusterProfiler)
+
+res_macro_top <- res_macro %>%
+  filter((log2FoldChange > 0.5 & padj < 0.05) | (log2FoldChange < -0.5 & padj < 0.05)) %>%
+  arrange(padj)
+res_macro_top <- res_macro_top$symbol
+library(org.Mm.eg.db)
+res_macro_top <- mapIds(org.Mm.eg.db, keys = res_macro_top, keytype = 'SYMBOL', column = "ENTREZID")
+res_macro_top
+universe_macro <- res_macro$symbol
+universe_macro <- mapIds(org.Mm.eg.db, keys = universe_macro, keytype = 'SYMBOL', column = "ENTREZID")
+
+ego <- enrichGO(res_macro_top, org.Mm.eg.db, ont = 'BP', universe = universe_macro)
+dotplot(ego) + scale_color_gradientn(colors = viridis::viridis(100))
+ego
+```
+
+I observed that differentially expressed genes were involved in immunity-related processes, as well as response to stress which might indicate some activation in response to TBI
+
+### Reclustering
+
+Then I reclustered the macrophage data to identify subclusters
+
+```{r}
+macro_seu <- readRDS('macrophage_seu.RDS')
+
+macro_seu
+
+DefaultAssay(macro_seu) <- 'integrated'
+
+macro_seu <- SCTransform(macro_seu, vars.to.regress = 'percent_mt')
+macro_seu <- RunPCA(macro_seu, npcs = 40)
+
+ElbowPlot(macro_seu, ndims = 40)
+
+macro_seu <- RunUMAP(macro_seu, dims = 1:30, reduction = 'pca')
+
+DimPlot(macro_seu)
+
+macro_seu <- FindNeighbors(macro_seu, dims = 1:30, reduction = 'pca')
+macro_seu <- FindClusters(macro_seu, resolution = 0.4)
+DimPlot(macro_seu, reduction = 'umap')
+DimPlot(macro_seu, reduction = 'umap', split.by = 'sample')
+
+markers_macro <- FindAllMarkers(macro_seu, min.pct = 0.25, logfc.threshold = 0.25, only.pos = T)
+top_markers_macro <- markers_macro %>%
+  group_by(cluster) %>%
+  slice_max(n=10, order_by = avg_log2FC)
+```
+
+Based on markers mentioned in the original publication I assigned cell types to clusters
+
+```{r}
+DimPlot(macro_seu, reduction = 'umap')
+my_clusters <- c('Resolution Phase', 'Ferritin Expressing','Anti-Inflammatory', 'Inflammatory 1', 'Inflammatory 2')
+
+
+macro_seu[['og_clusters']] <- Idents(macro_seu)
+
+names(my_clusters) <- levels(macro_seu)
+macro_seu <- RenameIdents(macro_seu, my_clusters)
+
+DimPlot(macro_seu, reduction = 'umap')
+DimPlot(macro_seu, reduction = 'umap', split.by = 'sample')
+
+
+```
+
+```{r fig.height=8, fig.width=12}
+FeaturePlot(macro_seu, features = c('Ifnar1', 'Ifi203', 'Irf2bp2', 'Irf5'), split.by = 'sample')
+```
+
+In the TBI sample, there was an increase in some inflammation-related genes.\
+There was also a difference in cell type quantities between samples.\
+These results indicate macrophages' response to TBI
+
+## T cells
+
+I repeated the same steps for T and B cells
+
+```{r}
+Tcells_seu <- readRDS('Tcells_seu.rds')
+
+Tcells_seu
+
+
+Tcells_counts <- as.matrix(Tcells_seu@assays$RNA@counts)
+Tcells_counts[1:10, 1:5]
+Tcells_counts <- Tcells_counts[rowSums(Tcells_counts) > 0, ]
+
+flt_Tcells_counts <- rowSums(Tcells_counts >= 5) >= 5
+table(flt_Tcells_counts)
+
+Tcells_counts <- Tcells_counts[flt_Tcells_counts, ]
+
+dim(Tcells_counts)
+flt_Tcells_seu <- Tcells_seu[,colnames(Tcells_seu) %in% colnames(Tcells_counts)]
+
+col_data <- as.data.frame(Tcells_seu@meta.data$sample)
+colnames(col_data) <- 'treatment'
+rownames(col_data) <- colnames(flt_Tcells_seu)
+
+
+
+dds <- DESeqDataSetFromMatrix(Tcells_counts, colData = col_data, design = ~ treatment)
+dds <- estimateSizeFactors(dds, type='poscount')
+
+dds <- DESeq(dds, test="LRT", reduced=~1, useT=TRUE, minmu=1e-6, minReplicatesForReplace = Inf)
+
+res_tcells <- results(dds)
+
+summary(res_tcells, alpha = 0.05)
+```
+
+Enrichment analysis
+
+```{r}
+res_tcells <- as.data.frame(res_tcells)
+res_tcells <- res_tcells %>%
+  arrange(padj, desc(log2FoldChange))
+head(res_tcells)
+
+res_tcells$symbol <- rownames(res_tcells)
+```
+
+### Reclustering
+
+```{r}
+Tcells_seu <- readRDS('Tcells_seu.rds')
+
+DefaultAssay(Tcells_seu) <- 'integrated'
+
+Tcells_seu <- SCTransform(Tcells_seu, vars.to.regress = 'percent_mt')
+
+Tcells_seu <- RunPCA(Tcells_seu, npcs = 40)
+DimPlot(Tcells_seu, reduction = 'pca')
+
+ElbowPlot(Tcells_seu, ndims = 40)
+
+Tcells_seu <- RunUMAP(Tcells_seu, dims = 1:30, reduction = 'pca')
+
+DimPlot(Tcells_seu, reduction = 'umap')
+
+Tcells_seu <- FindNeighbors(Tcells_seu, dims = 1:30, reduction = 'pca')
+Tcells_seu <- FindClusters(Tcells_seu, resolution = 0.4)
+
+DimPlot(Tcells_seu, reduction = 'umap')
+
+markers <- FindAllMarkers(Tcells_seu, min.pct = 0.25, logfc.threshold = 0.25, only.pos = T)
+
+top_markers <- markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 10, order_by = avg_log2FC)
+```
+
+I assigned cell types to these sub-clusters
+
+```{r}
+my_clusters <- c('CD8+ T cells', 'Th2 cells', 'NK/NKT cells', 'Th17 cells')
+
+Tcells_seu[['og_clusters']] <- Idents(Tcells_seu)
+
+names(my_clusters) <- levels(Tcells_seu)
+Tcells_seu <- RenameIdents(Tcells_seu, my_clusters)
+
+DimPlot(Tcells_seu, reduction = 'umap')
+
+saveRDS(Tcells_seu, 't_cells_seu_reclustered.rds')
+```
+
+### Pseudotime analysis
+
+I also examined trajectory in the differentiation status - in T cells there wasn't any interesting pattern which makes sense because the identified populations are advanced in T cell maturation
+
+```{r message=FALSE, warning=FALSE}
+library(monocle3)
+
+
+tcells_seu <- readRDS('t_cells_seu_reclustered.rds')
+prop.table(table(Idents(tcells_seu)))
+table(Idents(tcells_seu), tcells_seu$og_clusters)
+table(Idents(tcells_seu), tcells_seu$sample)
+```
+
+I prepared the data for analysis - I used UMAP reduction from `Seurat` instead of `Monocle3`
+
+```{r}
+DimPlot(tcells_seu, reduction = 'umap')
+
+expression_data <- tcells_seu@assays$RNA@data
+
+cell_md <- tcells_seu@meta.data
+
+gene_md <- data.frame(gene_short_name = rownames(expression_data),
+                      row.names = rownames(expression_data))
+
+combined_cds <- new_cell_data_set(expression_data = expression_data,
+                                  cell_metadata = cell_md,
+                                  gene_metadata = gene_md)
+
+
+combined_cds <- preprocess_cds(combined_cds, num_dim = 30)
+
+combined_cds <- reduce_dimension(combined_cds, max_components = 3, reduction_method = "UMAP")
+combined_cds <- cluster_cells(combined_cds, max_components = 3, reduction_method = "UMAP")
+
+
+
+#partitions
+recreate_partitions <-  rep(1, length(combined_cds@colData@rownames))
+names(recreate_partitions) <- combined_cds@colData@rownames
+recreate_partitions <- as.factor(recreate_partitions)
+
+
+list_cluster <- tcells_seu$cell_types
+combined_cds@clusters$UMAP$clusters <- list_cluster
+combined_cds@int_colData@listData$reducedDims$UMAP <- tcells_seu@reductions$umap@cell.embeddings
+```
+
+```{r}
+plot_cells(combined_cds, group_cells_by = 'cluster', cell_size = 1)
+```
+
+```{r}
+combined_cds <- learn_graph(combined_cds, use_partition = F)
+```
+
+```{r}
+plot_cells(combined_cds,
+           color_cells_by = 'cluster',
+           label_groups_by_cluster=F,
+           show_trajectory_graph = T,
+           trajectory_graph_segment_size = 1,
+           label_leaves=F, # this gives a little node label (outcome)
+           label_roots = T,
+           label_branch_points = F,
+           graph_label_size = 1, # size of # in circle
+           group_label_size = 3,
+           cell_size = 1,
+           alpha = 0.7,
+           scale_to_range = T)
+```
+
+
+
+
+
+
+
+
+
+```{r eval=FALSE}
+combined_cds <- order_cells(combined_cds, reduction_method = 'UMAP')
+
+plot_cells(combined_cds,
+           color_cells_by = "pseudotime",
+           label_groups_by_cluster=F,
+           show_trajectory_graph = T,
+           trajectory_graph_segment_size = 1,
+           label_leaves=F, # this gives a little node label (outcome)
+           label_roots = T,
+           label_branch_points = T,
+           graph_label_size = 3, # size of # in circle
+           group_label_size = 3,
+           cell_size = 1,
+           alpha = 0.7,
+           scale_to_range = T) 
+```
+```{r echo=FALSE, fig.width=8, fig.height=8}
+knitr::include_graphics('000012.png')
+```
+
+## B cells
+
+```{r}
+setwd("E:/Studia/Coding/Project/scRNA-seq/brain")
+
+Bcells_seu <- readRDS('Bcells_seu.rds')
+
+Bcells_seu
+
+
+bcells_counts <- as.matrix(Bcells_seu@assays$RNA@counts)
+bcells_counts[1:10, 1:5]
+bcells_counts <- bcells_counts[rowSums(bcells_counts) > 0, ]
+
+flt_bcells_counts <- rowSums(bcells_counts >= 5) >= 5
+table(flt_bcells_counts)
+
+bcells_counts <- bcells_counts[flt_bcells_counts, ]
+
+dim(bcells_counts)
+flt_Bcells_seu <- Bcells_seu[,colnames(Bcells_seu) %in% colnames(bcells_counts)]
+dim(Bcells_seu)
+
+col_data <- as.data.frame(flt_Bcells_seu@meta.data$sample)
+colnames(col_data) <- 'treatment'
+rownames(col_data) <- colnames(flt_Bcells_seu)
+
+
+
+dds <- DESeqDataSetFromMatrix(bcells_counts, colData = col_data, design = ~ treatment)
+dds <- estimateSizeFactors(dds, type='poscount')
+
+dds <- DESeq(dds, test="LRT", reduced=~1, useT=TRUE, minmu=1e-6, minReplicatesForReplace = Inf)
+
+res_bcells <- results(dds)
+
+summary(res_bcells, alpha = 0.05)
+
+
+
+
+res_bcells <- as.data.frame(res_bcells)
+res_bcells <- res_bcells %>%
+  arrange(padj, desc(log2FoldChange))
+head(res_bcells)
+
+res_bcells$symbol <- rownames(res_bcells)
+```
+
+Enrichment
+
+```{r}
+library(clusterProfiler)
+
+res_bcells_top <- res_bcells %>%
+  filter((log2FoldChange > 0.5 & padj < 0.05) | (log2FoldChange < -0.5 & padj < 0.05)) %>%
+  arrange(padj)
+res_bcells_top <- res_bcells_top$symbol
+library(org.Mm.eg.db)
+res_bcells_top <- mapIds(org.Mm.eg.db, keys = res_bcells_top, keytype = 'SYMBOL', column = "ENTREZID")
+res_bcells_top
+universe_bcells <- res_bcells$symbol
+universe_bcells <- mapIds(org.Mm.eg.db, keys = universe_bcells, keytype = 'SYMBOL', column = "ENTREZID")
+
+ego <- enrichGO(res_bcells_top, org.Mm.eg.db, ont = 'BP', universe = universe_bcells)
+dotplot(ego) + scale_color_gradientn(colors = viridis::viridis(100))
+ego
+```
+
+Most differentially expressed genes were involved in cell cycle and proliferation processes which might indicate that in response to TBI B cells proliferate and differentiate more
+
+### Reclustering and cell types
+
+```{r}
+Bcells_seu <- readRDS('Bcells_seu.rds')
+
+DefaultAssay(Bcells_seu) <- 'integrated'
+
+Bcells_seu <- SCTransform(Bcells_seu, vars.to.regress = 'percent_mt')
+
+Bcells_seu <- RunPCA(Bcells_seu, npcs = 40)
+DimPlot(Bcells_seu, reduction = 'pca')
+
+ElbowPlot(Bcells_seu, ndims = 40)
+
+Bcells_seu <- RunUMAP(Bcells_seu, dims = 1:30, reduction = 'pca')
+
+DimPlot(Bcells_seu, reduction = 'umap')
+
+Bcells_seu <- FindNeighbors(Bcells_seu, dims = 1:30, reduction = 'pca')
+Bcells_seu <- FindClusters(Bcells_seu, resolution = 0.5)
+
+DimPlot(Bcells_seu, reduction = 'umap')
+
+markers <- FindAllMarkers(Bcells_seu, min.pct = 0.25, logfc.threshold = 0.25, only.pos = T)
+
+top_markers <- markers %>%
+  group_by(cluster) %>%
+  slice_max(n = 10, order_by = avg_log2FC)
+
+my_clusters <- c('Mature B cells', 'Activated B cells', 'Immature B cells', 'Proliferating cells')
+
+Bcells_seu[['og_clusters']] <- Idents(Bcells_seu)
+
+names(my_clusters) <- levels(Bcells_seu)
+Bcells_seu <- RenameIdents(Bcells_seu, my_clusters)
+
+DimPlot(Bcells_seu, reduction = 'umap')
+
+saveRDS(Bcells_seu, 'b_cells_seu_reclustered.rds')
+```
+
+### Pseudotime analysis
+
+Reclustering revealed different states of B cells. Pseudotime analysis confirmed that Mature B cells and Activated B cells are the furthest along the differentiation trajectory
+
+```{r}
+library(monocle3)
+
+
+bcells_seu <- readRDS('b_cells_seu_reclustered.rds')
+prop.table(table(Idents(bcells_seu)))
+table(Idents(bcells_seu), bcells_seu$og_clusters)
+table(Idents(bcells_seu), bcells_seu$sample)
+```
+
+```{r}
+DimPlot(bcells_seu, reduction = 'umap')
+
+expression_data <- bcells_seu@assays$RNA@data
+
+cell_md <- bcells_seu@meta.data
+
+gene_md <- data.frame(gene_short_name = rownames(expression_data),
+                      row.names = rownames(expression_data))
+
+cds <- new_cell_data_set(expression_data = expression_data,
+                                  cell_metadata = cell_md,
+                                  gene_metadata = gene_md)
+
+
+cds <- preprocess_cds(cds, num_dim = 30)
+
+cds <- reduce_dimension(cds, max_components = 3, reduction_method = "UMAP")
+cds <- cluster_cells(cds, max_components = 3, reduction_method = "UMAP")
+
+
+
+#partitions
+recreate_partitions <-  rep(1, length(cds@colData@rownames))
+names(recreate_partitions) <- cds@colData@rownames
+recreate_partitions <- as.factor(recreate_partitions)
+
+
+list_cluster <- bcells_seu$cell_types
+cds@clusters$UMAP$clusters <- list_cluster
+cds@int_colData@listData$reducedDims$UMAP <- bcells_seu@reductions$umap@cell.embeddings
+```
+
+```{r}
+plot_cells(cds, group_cells_by = 'cluster', cell_size = 1)
+
+
+
+
+cds <- learn_graph(cds, use_partition = F)
+
+plot_cells(cds,
+           color_cells_by = 'cluster',
+           label_groups_by_cluster=F,
+           show_trajectory_graph = T,
+           trajectory_graph_segment_size = 1,
+           label_leaves=F, # this gives a little node label (outcome)
+           label_roots = T,
+           label_branch_points = F,
+           graph_label_size = 1, # size of # in circle
+           group_label_size = 3,
+           cell_size = 1,
+           alpha = 0.7,
+           scale_to_range = T)
+
+```
+
+```{r eval=FALSE}
+cds <- order_cells(cds, reduction_method = 'UMAP')
+
+
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_groups_by_cluster=F,
+           show_trajectory_graph = T,
+           trajectory_graph_segment_size = 1,
+           label_leaves=F, # this gives a little node label (outcome)
+           label_roots = T,
+           label_branch_points = T,
+           graph_label_size = 3, # size of # in circle
+           group_label_size = 3,
+           cell_size = 1,
+           alpha = 0.7,
+           scale_to_range = T) 
+
+```
+
+```{r echo=FALSE, fig.height=8, fig.width=8}
+knitr::include_graphics('000010.png')
+```
+
+
+## CellChat
+
+
+I used `CellChat` to examine the cell-cell interaction
+
+```{r}
+library(CellChat)
+
+
+seu_combined <- readRDS('seu_combined_clustered.RDS')
+
+seu_combined[['cell_types']] <- Idents(seu_combined)
+
+cell_chat_data <- createCellChat(seu_combined, group.by = c('cell_types'))
+
+cell_chat_data
+
+CellChatDB <- CellChatDB.mouse
+showDatabaseCategory(CellChatDB)
+```
+
+I did all the steps according to the `CellChat` vignette
+
+```{r}
+cell_chat_data@DB <- CellChatDB
+
+cell_chat_data <- subsetData(cell_chat_data)
+cell_chat_data <- identifyOverExpressedGenes(cell_chat_data)
+cell_chat_data <- identifyOverExpressedInteractions(cell_chat_data)
+cell_chat_data <- projectData(cell_chat_data, PPI.mouse)
+
+cell_chat_data <- computeCommunProb(cell_chat_data)
+
+cell_chat_data <- filterCommunication(cell_chat_data, min.cells = 10)
+
+cell_cell_df <- subsetCommunication(cell_chat_data)
+
+
+cell_chat_data <- computeCommunProbPathway(cell_chat_data)
+```
+
+```{r fig.width=8, fig.height=8}
+cell_chat_data <- aggregateNet(cell_chat_data)
+groupsize <- as.numeric(table(cell_chat_data@idents))
+
+netVisual_circle(cell_chat_data@net$count, vertex.weight = groupsize, weight.scale = T, label.edge = F)
+```
+
+```{r fig.width=7, fig.height=7}
+## inflamation of macrophages CCL and APP known for Alzhaimer disease (neurodegenerative)
+netVisual_aggregate(cell_chat_data, signaling = 'CCL', vertex.receiver = c(8,12,19))
+netVisual_aggregate(cell_chat_data, signaling = 'APP', vertex.receiver = c(18))
+pathway_df <- subsetCommunication(cell_chat_data, slot.name = 'netP')
+```
+
+Brain injuries can contribute to neurodegenerative disorders. APP is known for its role in Alzheimer's disease\ 
+There are many interactions involved in the APP pathway in the datasets.
+
+```{r fig.width=10, fig.width=10}
+library(RColorBrewer)
+
+netVisual_heatmap(cell_chat_data, signaling = 'CCL', color.heatmap = 'RdPu')
+netVisual_heatmap(cell_chat_data, signaling = 'COMPLEMENT', color.heatmap = 'RdPu')
+netVisual_heatmap(cell_chat_data, signaling = 'CD48', color.heatmap = 'RdPu')
+netVisual_heatmap(cell_chat_data, signaling = 'APP', color.heatmap = 'RdPu')
+```
+
+CCL genes were highly expressed in Inflammatory Macrophages, we can see that there are some interactions between macrophages and other cells in the CCL pathway
+
+```{r}
+netAnalysis_contribution(cell_chat_data, signaling = 'CCL')
+netAnalysis_contribution(cell_chat_data, signaling = 'APP')
+netAnalysis_contribution(cell_chat_data, signaling = 'CD48')
+
+```
+
+```{r fig.height=10, fig.width=10}
+ccl5_ccr5 <- extractEnrichedLR(cell_chat_data, signaling = 'CCL', geneLR.return = F)
+
+ccl5_ccr5_ <- ccl5_ccr5[1,]
+
+netVisual_individual(cell_chat_data, signaling = 'CCL', pairLR.use = ccl5_ccr5_, 
+                     vertex.receiver = c(2, 5,22), layout = 'chord')
+
+ccl5_ccr1 <- ccl5_ccr5[9,]
+
+
+netVisual_individual(cell_chat_data, signaling = 'CCL', pairLR.use = ccl5_ccr1, 
+                     vertex.receiver = c(2, 5,22), layout = 'chord')
+```
+
+```{r fig.width=10, fig.height=10}
+netVisual_bubble(cell_chat_data, sources.use = c(2), targets.use = c(5, 18, 20, 22, 23), remove.isolate = F)
+```
+
+```{r echo=TRUE, fig.height=10, fig.width=10}
+#macrophages
+netVisual_chord_gene(cell_chat_data, sources.use = 23, targets.use = c(2, 5, 18), lab.cex = 0.5,legend.pos.y = 30)
+# T cells 
+netVisual_chord_gene(cell_chat_data, sources.use = c(8,12, 19), targets.use = c(2, 5), lab.cex = 0.5,legend.pos.y = 30)
+#B cells
+netVisual_chord_gene(cell_chat_data, sources.use = c(6,10, 13), targets.use = c(8, 12), lab.cex = 0.5,legend.pos.y = 30)
+
+```
+
+
+## CellChat - comparing groups
+
+```{r}
+sham_seu <- seu_combined %>%
+  filter(sample == 'sham')
+tbi_seu <- seu_combined %>%
+  filter(sample == 'TBI')
+
+
+
+sham_cc <- createCellChat(sham_seu, group.by = 'cell_types')
+tbi_cc <- createCellChat(tbi_seu, group.by = 'cell_types')
+
+sham_cc
+
+
+
+CellChatDB <- CellChatDB.mouse
+showDatabaseCategory(CellChatDB)
+
+
+
+sham_cc@DB <- CellChatDB
+
+sham_cc <- subsetData(sham_cc)
+sham_cc <- identifyOverExpressedGenes(sham_cc)
+sham_cc <- identifyOverExpressedInteractions(sham_cc)
+sham_cc <- projectData(sham_cc, PPI.mouse)
+
+sham_cc <- computeCommunProb(sham_cc)
+
+sham_cc <- filterCommunication(sham_cc, min.cells = 10)
+
+cell_cell_df <- subsetCommunication(sham_cc)
+
+
+sham_cc <- computeCommunProbPathway(sham_cc)
+
+
+sham_cc <- aggregateNet(sham_cc)
+
+
+tbi_cc@DB <- CellChatDB
+
+tbi_cc <- subsetData(tbi_cc)
+tbi_cc <- identifyOverExpressedGenes(tbi_cc)
+tbi_cc <- identifyOverExpressedInteractions(tbi_cc)
+tbi_cc <- projectData(tbi_cc, PPI.mouse)
+
+tbi_cc <- computeCommunProb(tbi_cc)
+
+tbi_cc <- filterCommunication(tbi_cc, min.cells = 10)
+
+cell_cell_df <- subsetCommunication(tbi_cc)
+
+
+tbi_cc <- computeCommunProbPathway(tbi_cc)
+
+
+tbi_cc <- aggregateNet(tbi_cc)
+
+
+
+
+cc_list <- list(sham_cc, tbi_cc)
+
+cc <- mergeCellChat(cc_list, add.names = c('sham', 'TBI'))
+
+gg1 <- compareInteractions(cc, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(cc, show.legend = F, group = c(1,2), measure = 'weight')
+
+gg1 + gg2
+
+```
+
+
+Then I performed some comparative analysis and plots
+
+```{r fig.height=10, fig.width=10}
+netVisual_diffInteraction(cc, weight.scale = T)
+
+
+netVisual_heatmap(cc)
+par(mfrow = c(1,2))
+netVisual_circle(sham_cc@net$count, weight.scale = T, label.edge = F)
+netVisual_circle(tbi_cc@net$count, weight.scale = T, label.edge = F)
+
+sham_cc <- netAnalysis_computeCentrality(sham_cc, slot.name = 'netP')
+netAnalysis_signalingRole_scatter(sham_cc)
+
+tbi_cc <- netAnalysis_computeCentrality(tbi_cc, slot.name = 'netP')
+netAnalysis_signalingRole_scatter(tbi_cc)
+par(mfrow= c(1,1))
+
+```
+
+```{r fig.height=15, fig.width=15}
+
+# T cells 
+par(mfrow = c(1,2))
+netVisual_chord_gene(sham_cc, sources.use = c(8,12, 19), targets.use = c(2, 5), lab.cex = 0.5,legend.pos.y = 30)
+netVisual_chord_gene(tbi_cc, sources.use = c(8,12, 19), targets.use = c(2, 5), lab.cex = 0.5,legend.pos.y = 30)
+#B cells
+par(mfrow = c(1,2))
+netVisual_chord_gene(sham_cc, sources.use = c(6,10, 13), targets.use = c(8, 12), lab.cex = 0.5,legend.pos.y = 30)
+netVisual_chord_gene(tbi_cc, sources.use = c(6,10, 13), targets.use = c(8, 12), lab.cex = 0.5,legend.pos.y = 30)
+
+```
+
+```{r fig.height=13, fig.width=13}
+rankNet(cc, mode = 'comparison', stacked = T, do.stat = T)
+
+par(mfrow = c(1,2))
+netVisual_heatmap(sham_cc, signaling = 'CCL', color.heatmap = 'RdPu')
+netVisual_heatmap(tbi_cc, signaling = 'CCL', color.heatmap = 'RdPu')
+
+
+netVisual_aggregate(sham_cc, signaling = 'CCL', vertex.receiver = c(8,12,19))
+netVisual_aggregate(tbi_cc, signaling = 'CCL', vertex.receiver = c(8,12,19))
+netVisual_aggregate(sham_cc, signaling = 'APP', vertex.receiver = c(18))
+netVisual_aggregate(tbi_cc, signaling = 'APP', vertex.receiver = c(18))
+```
+
+
+
+Overall the results indicate changes in cell quantities, composition, and gene expression in meningeal tissue in response to TBI. The most interesting cell clusters affected by the procedure were macrophages, T cells, B cells, and fibroblasts. TBI induced immune response and activation of some cell types.
